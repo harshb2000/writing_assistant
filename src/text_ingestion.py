@@ -30,27 +30,132 @@ class Relationship:
     properties: Dict[str, Any] = None
 
 class TextIngestionPipeline:
-    def __init__(self):
+    def __init__(self, testing_mode: bool = False, track_sources: bool = True):
         self.openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.db = WritingGraphDB()
+        self.testing_mode = testing_mode
+        self.track_sources = track_sources
+        self.current_source_file = None
         
-    def parse_tags(self, text: str) -> List[Dict[str, str]]:
+        if self.testing_mode:
+            print("🧪 TESTING MODE: Entities will be marked for easy cleanup")
+    
+    def _add_tracking_fields(self, base_query: str) -> str:
+        """Add source tracking and test marker fields to a Cypher query."""
+        query = base_query
+        
+        # Add source tracking
+        if self.track_sources and self.current_source_file:
+            query += ",\n                        _source_file = $source_file"
+        
+        # Add test markers
+        if self.testing_mode:
+            query += ",\n                        _test_marker = true,\n                        _test_timestamp = datetime()"
+        
+        return query
+    
+    def _get_base_params(self, **params) -> Dict[str, Any]:
+        """Get parameters including tracking fields."""
+        result = dict(params)
+        if self.track_sources and self.current_source_file:
+            result["source_file"] = self.current_source_file
+        return result
+    
+    def reingest_file(self, file_path: str, story_title: str = None):
+        """Reingest a file by temporarily using test mode for easy cleanup."""
+        print(f"🔄 REINGESTING file: {file_path}")
+        print("💡 Using test mode for safe reingestion - will clean up after")
+        
+        # First, ingest in test mode
+        old_testing_mode = self.testing_mode
+        self.testing_mode = True
+        
+        try:
+            # Ingest with test markers
+            result = self.ingest_text_file(file_path, story_title)
+            
+            # If successful, clean up test entities and re-ingest normally
+            print("🧹 Cleaning up test run...")
+            self.db.cleanup_test_entities()
+            
+            print("📝 Re-ingesting normally...")
+            self.testing_mode = False
+            result = self.ingest_text_file(file_path, story_title)
+            
+            return result
+            
+        finally:
+            # Restore original testing mode
+            self.testing_mode = old_testing_mode
+        
+    def parse_tags(self, text: str) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Parse @tag:value syntax from text to create custom objects.
-        Examples: @power:hardening, @magic:fire, @skill:lockpicking
+        Parse @tag:value syntax from text to create appropriate entities.
+        Examples: @character:Soren creates Character, @power:hardening creates Tag
         """
-        tag_pattern = r'@(\w+):(\w+)'
+        tag_pattern = r'@(\w+):([A-Za-z_]+)'
         matches = re.findall(tag_pattern, text)
         
-        tags = []
-        for category, value in matches:
-            tags.append({
-                "category": category,
-                "value": value,
-                "name": f"{category.title()}: {value.title()}"
-            })
+        # Map categories to proper entity types
+        entity_mapping = {
+            "character": "characters",
+            "location": "locations", 
+            "scene": "scenes",
+            "theme": "themes",
+            "story": "stories"
+        }
         
-        return tags
+        parsed_entities = {
+            "characters": [],
+            "locations": [],
+            "scenes": [],
+            "themes": [], 
+            "stories": [],
+            "tags": []
+        }
+        
+        for category, value in matches:
+            if category.lower() in entity_mapping:
+                # Create proper entity type
+                entity_type = entity_mapping[category.lower()]
+                
+                if entity_type == "characters":
+                    parsed_entities["characters"].append({
+                        "name": value,
+                        "description": f"Character mentioned via @{category}:{value}",
+                        "role": "unknown"
+                    })
+                elif entity_type == "locations":
+                    parsed_entities["locations"].append({
+                        "name": value,
+                        "description": f"Location mentioned via @{category}:{value}",
+                        "type": "unknown"
+                    })
+                elif entity_type == "scenes":
+                    parsed_entities["scenes"].append({
+                        "title": value,
+                        "summary": f"Scene mentioned via @{category}:{value}"
+                    })
+                elif entity_type == "themes":
+                    parsed_entities["themes"].append({
+                        "name": value,
+                        "description": f"Theme mentioned via @{category}:{value}"
+                    })
+                elif entity_type == "stories":
+                    parsed_entities["stories"].append({
+                        "title": value,
+                        "summary": f"Story mentioned via @{category}:{value}"
+                    })
+            else:
+                # Create tag for non-entity categories (power, skill, magic, etc.)
+                parsed_entities["tags"].append({
+                    "category": category,
+                    "value": value,
+                    "name": f"{category.title()}: {value.title()}",
+                    "description": f"Tagged as @{category}:{value}"
+                })
+        
+        return parsed_entities
     
     def extract_entities_and_relationships(self, text: str, context: str = "") -> Dict[str, Any]:
         """
@@ -161,17 +266,28 @@ Only extract entities and relationships that are clearly present in the text. Be
             return {"entities": {}, "relationships": []}
     
     def create_entities_in_neo4j(self, entities: Dict[str, List[Dict]]):
-        """Create entities in Neo4j database."""
+        """Create entities in Neo4j database with deduplication."""
         with self.db.driver.session() as session:
             # Create characters
             for char in entities.get("characters", []):
-                query = """
-                MERGE (c:Character {name: $name})
-                SET c.description = $description,
-                    c.age = $age,
-                    c.role = $role,
-                    c.traits = $traits
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (c:Character {name: $name})
+                    SET c.description = $description,
+                        c.age = $age,
+                        c.role = $role,
+                        c.traits = $traits,
+                        c._test_marker = true,
+                        c._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (c:Character {name: $name})
+                    SET c.description = $description,
+                        c.age = $age,
+                        c.role = $role,
+                        c.traits = $traits
+                    """
                 session.run(query, 
                     name=char["name"],
                     description=char.get("description", ""),
@@ -182,11 +298,20 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             # Create locations
             for loc in entities.get("locations", []):
-                query = """
-                MERGE (l:Location {name: $name})
-                SET l.type = $type,
-                    l.description = $description
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (l:Location {name: $name})
+                    SET l.type = $type,
+                        l.description = $description,
+                        l._test_marker = true,
+                        l._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (l:Location {name: $name})
+                    SET l.type = $type,
+                        l.description = $description
+                    """
                 session.run(query,
                     name=loc["name"],
                     type=loc.get("type", ""),
@@ -195,12 +320,22 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             # Create scenes
             for scene in entities.get("scenes", []):
-                query = """
-                MERGE (s:Scene {title: $title})
-                SET s.summary = $summary,
-                    s.setting = $setting,
-                    s.mood = $mood
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (s:Scene {title: $title})
+                    SET s.summary = $summary,
+                        s.setting = $setting,
+                        s.mood = $mood,
+                        s._test_marker = true,
+                        s._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (s:Scene {title: $title})
+                    SET s.summary = $summary,
+                        s.setting = $setting,
+                        s.mood = $mood
+                    """
                 session.run(query,
                     title=scene["title"],
                     summary=scene.get("summary", ""),
@@ -210,10 +345,18 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             # Create themes
             for theme in entities.get("themes", []):
-                query = """
-                MERGE (t:Theme {name: $name})
-                SET t.description = $description
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (t:Theme {name: $name})
+                    SET t.description = $description,
+                        t._test_marker = true,
+                        t._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (t:Theme {name: $name})
+                    SET t.description = $description
+                    """
                 session.run(query,
                     name=theme["name"],
                     description=theme.get("description", "")
@@ -221,12 +364,22 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             # Create plot points
             for plot in entities.get("plot_points", []):
-                query = """
-                MERGE (p:PlotPoint {title: $title})
-                SET p.description = $description,
-                    p.importance = $importance,
-                    p.type = $type
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (p:PlotPoint {title: $title})
+                    SET p.description = $description,
+                        p.importance = $importance,
+                        p.type = $type,
+                        p._test_marker = true,
+                        p._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (p:PlotPoint {title: $title})
+                    SET p.description = $description,
+                        p.importance = $importance,
+                        p.type = $type
+                    """
                 session.run(query,
                     title=plot["title"],
                     description=plot.get("description", ""),
@@ -236,12 +389,22 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             # Create tags
             for tag in entities.get("tags", []):
-                query = """
-                MERGE (t:Tag {name: $name})
-                SET t.category = $category,
-                    t.value = $value,
-                    t.description = $description
-                """
+                if self.testing_mode:
+                    query = """
+                    MERGE (t:Tag {name: $name})
+                    SET t.category = $category,
+                        t.value = $value,
+                        t.description = $description,
+                        t._test_marker = true,
+                        t._test_timestamp = datetime()
+                    """
+                else:
+                    query = """
+                    MERGE (t:Tag {name: $name})
+                    SET t.category = $category,
+                        t.value = $value,
+                        t.description = $description
+                    """
                 session.run(query,
                     name=tag["name"],
                     category=tag.get("category", ""),
@@ -275,10 +438,14 @@ Only extract entities and relationships that are clearly present in the text. Be
         Ingest a text file and extract entities/relationships.
         """
         try:
+            # Set current source file for tracking
+            self.current_source_file = file_path
+            
+            print(f"Processing file: {file_path}")
+            
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            print(f"Processing file: {file_path}")
             print(f"Content length: {len(content)} characters")
             
             # Parse @tags first
@@ -291,11 +458,40 @@ Only extract entities and relationships that are clearly present in the text. Be
             
             extracted_data = self.extract_entities_and_relationships(content, context)
             
-            # Add parsed tags to extracted data
+            # Merge parsed tag entities with LLM extracted entities
             if parsed_tags:
                 if "entities" not in extracted_data:
                     extracted_data["entities"] = {}
-                extracted_data["entities"]["tags"] = extracted_data["entities"].get("tags", []) + parsed_tags
+                
+                # Merge each entity type, avoiding duplicates
+                for entity_type, entities in parsed_tags.items():
+                    if entities:  # Only process if there are entities
+                        existing_entities = extracted_data["entities"].get(entity_type, [])
+                        
+                        # Deduplicate by name/title
+                        existing_names = set()
+                        if entity_type in ["characters", "locations", "themes"]:
+                            existing_names = {e.get("name", "").lower() for e in existing_entities}
+                        elif entity_type in ["scenes", "stories"]:
+                            existing_names = {e.get("title", "").lower() for e in existing_entities}
+                        elif entity_type == "tags":
+                            existing_names = {e.get("name", "").lower() for e in existing_entities}
+                        
+                        # Add new entities that don't already exist
+                        for entity in entities:
+                            identifier = ""
+                            if entity_type in ["characters", "locations", "themes"]:
+                                identifier = entity.get("name", "").lower()
+                            elif entity_type in ["scenes", "stories"]:
+                                identifier = entity.get("title", "").lower()
+                            elif entity_type == "tags":
+                                identifier = entity.get("name", "").lower()
+                            
+                            if identifier and identifier not in existing_names:
+                                existing_entities.append(entity)
+                                existing_names.add(identifier)
+                        
+                        extracted_data["entities"][entity_type] = existing_entities
             
             print("Extracted entities:")
             for entity_type, entities in extracted_data["entities"].items():
@@ -333,11 +529,40 @@ Only extract entities and relationships that are clearly present in the text. Be
         
         extracted_data = self.extract_entities_and_relationships(content, context)
         
-        # Add parsed tags to extracted data
+        # Merge parsed tag entities with LLM extracted entities
         if parsed_tags:
             if "entities" not in extracted_data:
                 extracted_data["entities"] = {}
-            extracted_data["entities"]["tags"] = extracted_data["entities"].get("tags", []) + parsed_tags
+            
+            # Merge each entity type, avoiding duplicates
+            for entity_type, entities in parsed_tags.items():
+                if entities:  # Only process if there are entities
+                    existing_entities = extracted_data["entities"].get(entity_type, [])
+                    
+                    # Deduplicate by name/title
+                    existing_names = set()
+                    if entity_type in ["characters", "locations", "themes"]:
+                        existing_names = {e.get("name", "").lower() for e in existing_entities}
+                    elif entity_type in ["scenes", "stories"]:
+                        existing_names = {e.get("title", "").lower() for e in existing_entities}
+                    elif entity_type == "tags":
+                        existing_names = {e.get("name", "").lower() for e in existing_entities}
+                    
+                    # Add new entities that don't already exist
+                    for entity in entities:
+                        identifier = ""
+                        if entity_type in ["characters", "locations", "themes"]:
+                            identifier = entity.get("name", "").lower()
+                        elif entity_type in ["scenes", "stories"]:
+                            identifier = entity.get("title", "").lower()
+                        elif entity_type == "tags":
+                            identifier = entity.get("name", "").lower()
+                        
+                        if identifier and identifier not in existing_names:
+                            existing_entities.append(entity)
+                            existing_names.add(identifier)
+                    
+                    extracted_data["entities"][entity_type] = existing_entities
         
         print("Extracted entities:")
         for entity_type, entities in extracted_data["entities"].items():

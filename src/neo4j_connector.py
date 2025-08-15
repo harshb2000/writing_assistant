@@ -163,6 +163,59 @@ class WritingGraphDB:
                 ORDER BY t.value
             """, category=category)
             return [dict(record) for record in result]
+    
+    def cleanup_test_entities(self) -> Dict[str, int]:
+        """Remove all entities marked with _test_marker = true."""
+        with self.driver.session() as session:
+            # Count test entities by type before deletion
+            count_result = session.run("""
+                MATCH (n)
+                WHERE n._test_marker = true
+                RETURN labels(n)[0] as type, count(n) as count
+                ORDER BY type
+            """)
+            counts = {record["type"]: record["count"] for record in count_result}
+            
+            # Delete test entities and their relationships
+            session.run("""
+                MATCH (n)
+                WHERE n._test_marker = true
+                DETACH DELETE n
+            """)
+            
+            return counts
+    
+    def get_test_entity_count(self) -> int:
+        """Get count of test entities in the database."""
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH (n)
+                WHERE n._test_marker = true
+                RETURN count(n) as count
+            """)
+            return result.single()["count"]
+    
+    def cleanup_entities_from_file(self, file_path: str) -> Dict[str, int]:
+        """Remove entities that were created from a specific source file."""
+        with self.driver.session() as session:
+            # Count entities before deletion
+            count_result = session.run("""
+                MATCH (n)
+                WHERE n._source_file = $source_file
+                RETURN labels(n)[0] as type, count(n) as count
+                ORDER BY type
+            """, source_file=file_path)
+            counts = {record["type"]: record["count"] for record in count_result}
+            
+            # Delete entities and their relationships
+            if counts:
+                session.run("""
+                    MATCH (n)
+                    WHERE n._source_file = $source_file
+                    DETACH DELETE n
+                """, source_file=file_path)
+            
+            return counts
 
 
 def main():

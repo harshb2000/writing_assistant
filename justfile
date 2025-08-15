@@ -17,6 +17,7 @@ default:
     @echo "📂 Content Management:"
     @echo "  just finalize            - Process all drafts"
     @echo "  just process FILE        - Process specific file"
+    @echo "  just reingest FILE       - Re-ingest file (cleans old entities first)"
     @echo "  just preview             - Preview what would be organized"
     @echo "  just status              - Show content summary"
     @echo ""
@@ -29,6 +30,12 @@ default:
     @echo "  just commit MESSAGE      - Commit changes with message"
     @echo "  just push                - Push to remote repository"
     @echo "  just status-git          - Show git status and recent commits"
+    @echo ""
+    @echo "🧪 Testing & Reingestion:"
+    @echo "  just test-ingest FILE    - Test ingestion with markers (safe)"
+    @echo "  just test-finalize       - Test finalize all drafts (safe)"
+    @echo "  just cleanup-tests       - Remove all test entities"
+    @echo "  just test-status         - Show test entity count"
     @echo ""
     @echo "🔧 System:"
     @echo "  just setup               - Install dependencies"
@@ -145,6 +152,11 @@ process file:
     @echo "📄 Processing: {{file}}"
     source writing_env/bin/activate && cd src && python organize_content.py --file "../{{file}}" --story "Your Story"
 
+reingest file:
+    @echo "🔄 Re-ingesting: {{file}}"
+    @echo "⚠️  This will delete old entities from this file and re-create them"
+    source writing_env/bin/activate && cd src && python -c "from text_ingestion import TextIngestionPipeline; pipeline = TextIngestionPipeline(); pipeline.reingest_file('../{{file}}', 'Your Story'); pipeline.db.close()"
+
 preview:
     @echo "👀 Preview: What would be organized"
     source writing_env/bin/activate && cd src && python organize_content.py --dry-run
@@ -194,6 +206,25 @@ export:
     @echo "📤 Exporting knowledge graph..."
     @mkdir -p exports
     @source writing_env/bin/activate && cd src && python -c "print('Export functionality needs to be implemented')"
+
+# Testing commands
+test-ingest file:
+    @echo "🧪 Testing ingestion: {{file}}"
+    @echo "⚠️  This will add entities with test markers for easy cleanup"
+    source writing_env/bin/activate && cd src && python -c "from text_ingestion import TextIngestionPipeline; pipeline = TextIngestionPipeline(testing_mode=True); pipeline.ingest_text_file('{{file}}', 'Test Story'); pipeline.db.close()"
+
+test-finalize:
+    @echo "🧪 Testing finalize (all drafts)"
+    @echo "⚠️  This will add entities with test markers for easy cleanup"
+    @echo "🚧 Test finalize not implemented yet - use test-ingest for individual files" 
+
+cleanup-tests:
+    @echo "🧹 Cleaning up test entities..."
+    source writing_env/bin/activate && cd src && python -c "from neo4j_connector import WritingGraphDB; db = WritingGraphDB(); counts = db.cleanup_test_entities(); print('🗑️  Cleaned up test entities:'); [print(f'  {entity_type}: {count} entities') for entity_type, count in counts.items()]; print(f'Total: {sum(counts.values())} entities removed') if counts else print('  No test entities found'); db.close()"
+
+test-status:
+    @echo "🔍 Test entity status:"
+    source writing_env/bin/activate && cd src && python -c "from neo4j_connector import WritingGraphDB; db = WritingGraphDB(); count = db.get_test_entity_count(); print(f'📊 Test entities in database: {count}'); db.close()"
 
 # Quick recipes for common workflows
 new-story story_name:
