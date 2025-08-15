@@ -25,6 +25,11 @@ default:
     @echo "  just ask QUESTION        - Ask single question"
     @echo "  just stats               - Show database statistics"
     @echo ""
+    @echo "📚 Git:"
+    @echo "  just commit MESSAGE      - Commit changes with message"
+    @echo "  just push                - Push to remote repository"
+    @echo "  just status-git          - Show git status and recent commits"
+    @echo ""
     @echo "🔧 System:"
     @echo "  just setup               - Install dependencies"
     @echo "  just test-db             - Test Neo4j connection"
@@ -206,6 +211,25 @@ writing-session:
     @echo "  just new-draft 'name' - Start writing"
     @echo "  just finalize - Process drafts"  
     @echo "  just query - Ask questions"
+
+# Git commands
+commit message:
+    @echo "📝 Committing changes..."
+    git add .
+    git commit -m "{{message}}"
+    @echo "✅ Committed: {{message}}"
+
+push:
+    @echo "🚀 Pushing to remote..."
+    git push
+    @echo "✅ Pushed to remote repository"
+
+status-git:
+    @echo "📊 Git Status:"
+    git status --short
+    @echo ""
+    @echo "📝 Recent commits:"
+    git log --oneline -5
 
 # Development helpers (hidden from main menu)
 _clean:
